@@ -111,6 +111,21 @@ app.post('/api/admin/login',(req,res)=>{
   adminSessions.add(token);
   res.json({token});
 });
+app.get('/api/orders/history',userAuth,(req,res)=>{
+  const rows=db.prepare(`SELECT o.id,o.type,o.amount,o.card_type,o.card_value,o.game,o.uid,o.discount,o.status,o.created_at,o.product_id,p.game product_game,p.name product_name
+    FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.user_id=? ORDER BY o.created_at DESC`).all(req.user.id);
+  res.json(rows);
+});
+app.get('/api/orders/deposit-history',userAuth,(req,res)=>{
+  const rows=db.prepare(`SELECT id,type,amount,card_type,card_value,status,created_at FROM orders WHERE user_id=? AND type IN ('card','bank') ORDER BY created_at DESC`).all(req.user.id);
+  res.json(rows);
+});
+app.get('/api/orders/history/:id/account',userAuth,(req,res)=>{
+  const o=db.prepare(`SELECT o.id,o.type,o.status,o.product_id,o.created_at,p.game,p.name,p.account_data FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=? AND o.user_id=? AND o.type='buy'`).get(req.params.id,req.user.id);
+  if(!o)return res.status(404).json({error:'Không tìm thấy đơn hàng'});
+  if(o.status!=='done')return res.status(403).json({error:'Đơn hàng chưa hoàn tất'});
+  res.json({id:o.id,game:o.game,name:o.name,account_data:o.account_data||''});
+});
 app.get('/api/admin/products',adminAuth,(req,res)=>res.json(db.prepare('SELECT * FROM products ORDER BY id DESC').all()));
 app.post('/api/admin/products',adminAuth,(req,res)=>{const {game,name,price,desc='',account_data=''}=req.body;if(!game||!name||!Number.isFinite(+price)||+price<0)return res.status(400).json({error:'Dữ liệu không hợp lệ'});const r=db.prepare('INSERT INTO products(game,name,price,desc,account_data) VALUES (?,?,?,?,?)').run(String(game).trim(),String(name).trim(),Math.round(+price),String(desc||''),String(account_data||''));res.json({id:r.lastInsertRowid});});
 app.put('/api/admin/products/:id',adminAuth,(req,res)=>{const {game,name,price,desc='',account_data='',status='available'}=req.body;if(!game||!name||!Number.isFinite(+price)||!['available','sold'].includes(status))return res.status(400).json({error:'Dữ liệu không hợp lệ'});const r=db.prepare('UPDATE products SET game=?,name=?,price=?,desc=?,account_data=?,status=? WHERE id=?').run(String(game).trim(),String(name).trim(),Math.round(+price),String(desc||''),String(account_data||''),status,req.params.id);if(!r.changes)return res.status(404).json({error:'Không tìm thấy acc'});res.json({ok:true})});
@@ -121,6 +136,7 @@ app.get('/api/admin/users',adminAuth,(req,res)=>{
   res.json(db.prepare('SELECT id,username,name,balance,is_admin,created_at FROM users ORDER BY is_admin DESC, id DESC').all());
 });
 app.post('/api/admin/users/:id/balance',adminAuth,(req,res)=>{const amount=Number(req.body?.balance);if(!Number.isSafeInteger(amount)||amount<0)return res.status(400).json({error:'Số dư phải là số nguyên không âm'});const r=db.prepare('UPDATE users SET balance=? WHERE id=?').run(amount,req.params.id);if(!r.changes)return res.status(404).json({error:'Không tìm thấy tài khoản'});res.json({ok:true,balance:amount})});
+app.put('/api/admin/users/:id',adminAuth,(req,res)=>{const u=db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);if(!u)return res.status(404).json({error:'Không tìm thấy tài khoản'});const name=String(req.body?.name??u.name??'').trim().slice(0,60);const password=String(req.body?.password??'');if(password&&password.length<6)return res.status(400).json({error:'Mật khẩu mới tối thiểu 6 ký tự'});if(password)db.prepare('UPDATE users SET name=?, password_hash=? WHERE id=?').run(name,hash(password),u.id);else db.prepare('UPDATE users SET name=? WHERE id=?').run(name,u.id);res.json({ok:true})});
 app.get('/api/admin/orders',adminAuth,(req,res)=>{
   const q=String(req.query?.q||'').trim();
   const like='%'+q+'%';
@@ -200,13 +216,13 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
       db.prepare("UPDATE products SET status='sold' WHERE id=?").run(p.id);
       if(coupon)db.prepare('UPDATE coupons SET used_count=used_count+1 WHERE id=?').run(coupon.id);
       db.prepare('INSERT INTO orders(id,type,user_id,product_id,amount,coupon_code,discount,receive,status) VALUES (?,?,?,?,?,?,?,?,?)').run(id,'buy',req.user.id,p.id,total,coupon?.code||null,discount,p.account_data||'','done');
-      return {id,game:p.game,name:p.name,price:p.price,discount,total,account_data:p.account_data||'',balance:u.balance-total};
+      return {id,game:p.game,name:p.name,price:p.price,discount,total,balance:u.balance-total};
     })();
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){
