@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3000;
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'nguyen188208';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'CHANGE_ME_NOW';
 const db = new Database(process.env.DB_PATH || path.join(__dirname, 'store.db'));
 db.pragma('journal_mode = WAL');
@@ -59,6 +59,9 @@ app.post('/api/register',(req,res)=>{
   const cleanName=String(name||'').trim().slice(0,60);
   if(!/^[a-zA-Z0-9_]{3,24}$/.test(cleanUser)||String(password||'').length<6) return res.status(400).json({error:'Tên tài khoản 3-24 ký tự và mật khẩu tối thiểu 6 ký tự'});
   try{
+    // Username không được trùng, kể cả khác chữ hoa/chữ thường (ví dụ nguyen2008 và NGUYEN2008).
+    const existed=db.prepare('SELECT id FROM users WHERE lower(username)=lower(?)').get(cleanUser);
+    if(existed) return res.status(409).json({error:'Tên tài khoản đã tồn tại'});
     const r=db.prepare('INSERT INTO users(username,password_hash,name) VALUES (?,?,?)').run(cleanUser,hash(password),cleanName);
     const token=crypto.randomBytes(32).toString('hex');
     userSessions.set(token,Number(r.lastInsertRowid));
@@ -77,6 +80,7 @@ app.get('/api/admin/products',adminAuth,(req,res)=>res.json(db.prepare('SELECT *
 app.post('/api/admin/products',adminAuth,(req,res)=>{const {game,name,price,desc='',account_data=''}=req.body;if(!game||!name||!Number.isFinite(+price))return res.status(400).json({error:'Dữ liệu không hợp lệ'});const r=db.prepare('INSERT INTO products(game,name,price,desc,account_data) VALUES (?,?,?,?,?)').run(game,name,+price,desc,account_data);res.json({id:r.lastInsertRowid});});
 app.delete('/api/admin/products/:id',adminAuth,(req,res)=>{db.prepare('DELETE FROM products WHERE id=?').run(req.params.id);res.json({ok:true})});
 app.get('/api/admin/users',adminAuth,(req,res)=>res.json(db.prepare('SELECT id,username,name,balance,is_admin,created_at FROM users ORDER BY id DESC').all()));
+app.post('/api/admin/users/:id/balance',adminAuth,(req,res)=>{const amount=Number(req.body?.balance);if(!Number.isSafeInteger(amount)||amount<0)return res.status(400).json({error:'Số dư phải là số nguyên không âm'});const r=db.prepare('UPDATE users SET balance=? WHERE id=?').run(amount,req.params.id);if(!r.changes)return res.status(404).json({error:'Không tìm thấy tài khoản'});res.json({ok:true,balance:amount})});
 app.get('/api/admin/orders',adminAuth,(req,res)=>res.json(db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all()));
 app.post('/api/admin/settings',adminAuth,(req,res)=>{for(const k of ['rate','bank','cardRates','topups','support'])if(req.body[k]!==undefined)setSetting(k,req.body[k]);res.json({ok:true})});
 app.post('/api/admin/orders/:id/approve-card',adminAuth,(req,res)=>{const tx=db.transaction(()=>{const o=db.prepare("SELECT * FROM orders WHERE id=? AND type='card' AND status='pending'").get(req.params.id);if(!o)throw new Error('Đơn không hợp lệ');const rates=getSetting('cardRates')||{};const rate=Number(rates[o.card_type]??getSetting('rate')??0);const credit=Math.round(Number(o.card_value)*rate/100);db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(credit,o.user_id);db.prepare("UPDATE orders SET status='done',amount=? WHERE id=?").run(credit,o.id);return credit;});try{res.json({ok:true,credit:tx()})}catch(e){res.status(400).json({error:e.message})}});
@@ -86,7 +90,10 @@ app.post('/api/orders/bank',userAuth,(req,res)=>{const {amount}=req.body;if(!amo
 app.post('/api/orders/topup',userAuth,(req,res)=>{const {game,value,uid}=req.body;if(!game||!value||!uid)return res.status(400).json({error:'Thiếu thông tin'});const rates=getSetting('topups')||{};const rate=+rates[game]||0;const pay=Math.round(+value*(100-rate)/100);if(req.user.balance<pay)return res.status(400).json({error:'Số dư không đủ'});const tx=db.transaction(()=>{db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(pay,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,game,uid,status) VALUES (?,?,?,?,?,?,?)').run(id,'topup',req.user.id,pay,game,uid,'pending');return id})();res.json({id:tx,pay,rate,status:'pending'});});
 app.post('/api/orders/withdraw',userAuth,(req,res)=>{const {bank,number,owner,amount}=req.body;if(!bank||!number||!owner||!amount||amount<1000)return res.status(400).json({error:'Thông tin rút tiền không hợp lệ'});const tx=db.transaction(()=>{const u=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);if(u.balance<amount)throw new Error('Số dư không đủ');db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(+amount,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,withdraw_bank,withdraw_number,withdraw_owner,status) VALUES (?,?,?,?,?,?,?,?)').run(id,'withdraw',req.user.id,+amount,bank,number,owner,'pending');return id})();try{res.json({id:tx,status:'pending'})}catch(e){res.status(400).json({error:e.message})}});
 app.post('/api/orders/buy',userAuth,(req,res)=>{const {productId}=req.body;const tx=db.transaction(()=>{const p=db.prepare("SELECT * FROM products WHERE id=? AND status='available'").get(productId);if(!p)throw new Error('ACC không còn bán');const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,product_id,amount,status) VALUES (?,?,?,?,?,?)').run(id,'buy',req.user.id,p.id,p.price,'pending');db.prepare("UPDATE products SET status='sold' WHERE id=?").run(p.id);return {id,p:{id:p.id,game:p.game,name:p.name,price:p.price,account_data:p.account_data}}});try{res.json(tx())}catch(e){res.status(409).json({error:e.message})}});
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
-app.listen(PORT,()=>console.log(`NGUYENGAMESTORE running on http://localhost:${PORT}`));
+
+app.listen(PORT, function(){
+  console.log('NGUYENGAMESTORE running on http://localhost:' + PORT);
+});
