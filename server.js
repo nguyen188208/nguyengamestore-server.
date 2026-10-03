@@ -69,5 +69,7 @@ app.post('/api/orders/bank',(req,res)=>{const {amount,customer}=req.body;if(!amo
 app.post('/api/orders/topup',(req,res)=>{const {game,value,uid}=req.body;if(!game||!value||!uid)return res.status(400).json({error:'Thiếu thông tin'});const rates=getSetting('topups')||{};const rate=+rates[game]||0;const pay=Math.round(+value*(100-rate)/100);const id=makeId();db.prepare('INSERT INTO orders(id,type,amount,game,uid,status) VALUES (?,?,?,?,?,?)').run(id,'topup',pay,game,uid,'pending');res.json({id,pay,rate,status:'pending'});});
 app.post('/api/orders/buy',(req,res)=>{const {productId,customer=''}=req.body;const tx=db.transaction(()=>{const p=db.prepare("SELECT * FROM products WHERE id=? AND status='available'").get(productId);if(!p)throw new Error('ACC không còn bán');const id=makeId();db.prepare('INSERT INTO orders(id,type,product_id,customer,amount,status) VALUES (?,?,?,?,?,?)').run(id,'buy',p.id,customer,p.price,'pending');db.prepare("UPDATE products SET status='sold' WHERE id=?").run(p.id);return {id,p:{id:p.id,game:p.game,name:p.name,price:p.price,account_data:p.account_data}};});try{res.json(tx())}catch(e){res.status(409).json({error:e.message})}});
 
-app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
 app.listen(PORT,()=>console.log(`NGUYENGAMESTORE running on http://localhost:${PORT}`));
