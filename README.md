@@ -20,3 +20,10 @@ Hosting phải hỗ trợ Node.js và chạy được `npm start`. Nếu dùng d
 
 ### Lưu ý database cũ
 Nếu Railway dùng database cũ, server tự bổ sung các cột còn thiếu cho bảng users/products/orders khi khởi động. Sau khi deploy bản mới, thử đăng ký một tên tài khoản mới.
+
+
+## Cập nhật v11
+- Thêm dịch vụ Nạp game: Robux chính hãng và 120h.
+- Hiển thị số tiền thanh toán tự động theo chiết khấu.
+- Thêm phí rút cố định do admin cấu hình; ví dụ rút 100.000đ, phí 5.000đ thì tổng trừ ví 105.000đ.
+- Phí rút mới được áp dụng tự động cho các yêu cầu rút mới.
