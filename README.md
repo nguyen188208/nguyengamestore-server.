@@ -53,3 +53,10 @@ Railway cần `BANK_WEBHOOK_SECRET`. Đơn vị ngân hàng/trung gian cần g�
 ## Lưu ý
 
 Thesieure phải kích hoạt API Merchant và callback cho tài khoản của bạn. URL/API cụ thể có thể khác theo cấu hình Merchant, vì vậy `THESIEURE_API_URL` và `THESIEURE_API_METHOD` được để cấu hình thay vì hard-code bắt buộc.
+
+## Bảo vệ dữ liệu khi cập nhật
+- Không đưa `store.db` vào ZIP deploy. Database phải nằm trên Railway Volume.
+- Railway: tạo Volume và mount vào `/data`, sau đó đặt biến `DB_PATH=/data/store.db` và `BACKUP_DIR=/data/backups`.
+- Server tự tạo backup lúc khởi động và mỗi 6 giờ, giữ tối đa 20 bản gần nhất.
+- Admin có thể gọi chức năng backup/restore trong API quản trị; luôn nên backup trước khi cập nhật phiên bản.
+- Không xóa Volume khi redeploy. Chỉ thay source code/ZIP.

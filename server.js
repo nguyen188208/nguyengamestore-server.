@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -16,8 +17,30 @@ const THESIEURE_PARTNER_KEY = String(process.env.THESIEURE_PARTNER_KEY || '').tr
 const THESIEURE_API_URL = String(process.env.THESIEURE_API_URL || 'https://thesieure.com/chargingws/v2').trim();
 const THESIEURE_API_METHOD = String(process.env.THESIEURE_API_METHOD || 'GET').trim().toUpperCase();
 const BANK_WEBHOOK_SECRET = String(process.env.BANK_WEBHOOK_SECRET || '').trim();
-const db = new Database(process.env.DB_PATH || path.join(__dirname, 'store.db'));
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'store.db');
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(DB_PATH), 'backups');
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
+let db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+
+async function createDatabaseBackup(label='auto'){
+  const safe=String(label).replace(/[^a-zA-Z0-9_-]/g,'_');
+  const stamp=new Date().toISOString().replace(/[:.]/g,'-');
+  const file=path.join(BACKUP_DIR, `store-${safe}-${stamp}.db`);
+  await db.backup(file);
+  return file;
+}
+
+async function cleanupBackups(keep=20){
+  const files=fs.readdirSync(BACKUP_DIR).filter(f=>/^store-.*\.db$/.test(f)).map(f=>({f, t:fs.statSync(path.join(BACKUP_DIR,f)).mtimeMs})).sort((a,b)=>b.t-a.t);
+  for(const x of files.slice(keep)) { try{fs.unlinkSync(path.join(BACKUP_DIR,x.f));}catch{} }
+}
+
+// A backup is created before each deployment starts changing the schema.
+// The backup folder should live on the same Railway Volume as DB_PATH.
+createDatabaseBackup('startup').then(()=>cleanupBackups()).catch(()=>{});
+setInterval(()=>createDatabaseBackup('scheduled').then(()=>cleanupBackups()).catch(()=>{}), 6*60*60*1000).unref();
 
 const hasCol=(table,col)=>db.prepare(`PRAGMA table_info(${table})`).all().some(x=>x.name===col);
 const addCol=(table,col,definition)=>{if(!hasCol(table,col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${definition}`)};
@@ -281,6 +304,45 @@ app.delete('/api/admin/orders/:id',adminAuth,(req,res)=>{
   if(!r.changes)return res.status(404).json({error:'Không tìm thấy đơn hàng'});
   res.json({ok:true});
 });
+app.get('/api/admin/backups',adminAuth,(req,res)=>{
+  try{
+    const files=fs.readdirSync(BACKUP_DIR).filter(f=>/^store-.*\.db$/.test(f)).map(f=>{const st=fs.statSync(path.join(BACKUP_DIR,f));return {name:f,size:st.size,created_at:st.mtime.toISOString()};}).sort((a,b)=>b.created_at.localeCompare(a.created_at));
+    res.json(files);
+  }catch(e){res.status(500).json({error:'Không đọc được danh sách backup'});}
+});
+
+app.get('/api/admin/backup',adminAuth,async(req,res)=>{
+  try{
+    const file=await createDatabaseBackup('manual');
+    await cleanupBackups();
+    res.download(file,'nguyengamestore-backup.db');
+  }catch(e){res.status(500).json({error:'Không tạo được backup'});}
+});
+
+app.post('/api/admin/restore',adminAuth,async(req,res)=>{
+  const b64=String(req.body?.database_base64||'');
+  if(!b64 || b64.length>50*1024*1024)return res.status(400).json({error:'File backup không hợp lệ hoặc quá lớn'});
+  const temp=path.join(BACKUP_DIR,`restore-${Date.now()}.db`);
+  try{
+    fs.writeFileSync(temp,Buffer.from(b64,'base64'));
+    const test=new Database(temp,{readonly:true});
+    const ok=test.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").get();
+    test.close();
+    if(!ok)throw new Error('Đây không phải database NGUYENGAMESTORE');
+    await createDatabaseBackup('before-restore');
+    db.close();
+    fs.copyFileSync(temp,DB_PATH);
+    db=new Database(DB_PATH);
+    db.pragma('journal_mode = WAL');
+    fs.unlinkSync(temp);
+    res.json({ok:true,message:'Đã khôi phục database. Vui lòng đăng nhập lại.'});
+  }catch(e){
+    try{if(fs.existsSync(temp))fs.unlinkSync(temp);}catch{}
+    if(!db.open){db=new Database(DB_PATH);db.pragma('journal_mode = WAL');}
+    res.status(400).json({error:e.message||'Khôi phục thất bại'});
+  }
+});
+
 app.post('/api/admin/settings',adminAuth,(req,res)=>{for(const k of ['rate','bank','cardRates','topups','withdrawFee','support'])if(req.body[k]!==undefined)setSetting(k,k==='withdrawFee'?Math.max(0,Math.round(Number(req.body[k])||0)):req.body[k]);res.json({ok:true})});
 app.get('/api/admin/coupons',adminAuth,(req,res)=>res.json(db.prepare('SELECT * FROM coupons ORDER BY id DESC').all()));
 app.post('/api/admin/coupons',adminAuth,(req,res)=>{const code=String(req.body?.code||'').trim().toUpperCase();const percent=Number(req.body?.percent);const maxUses=Number(req.body?.max_uses||0);if(!/^[A-Z0-9_-]{3,40}$/.test(code)||!Number.isInteger(percent)||percent<1||percent>100||!Number.isInteger(maxUses)||maxUses<0)return res.status(400).json({error:'Mã hoặc phần trăm giảm giá không hợp lệ'});try{const r=db.prepare('INSERT INTO coupons(code,percent,max_uses,active) VALUES (?,?,?,1)').run(code,percent,maxUses);res.json({id:r.lastInsertRowid})}catch(e){if(e?.code==='SQLITE_CONSTRAINT_UNIQUE')return res.status(409).json({error:'Mã giảm giá đã tồn tại'});res.status(500).json({error:'Không thể tạo mã giảm giá'})}});
@@ -391,9 +453,10 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
+
 app.listen(PORT, function(){
   console.log('NGUYENGAMESTORE running on http://localhost:' + PORT);
 });
