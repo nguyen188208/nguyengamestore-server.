@@ -65,6 +65,25 @@ if(!adminUser) db.prepare('INSERT INTO users(username,password_hash,name,is_admi
 else db.prepare('UPDATE users SET is_admin=1, password_hash=? WHERE id=?').run(hash(ADMIN_PASSWORD),adminUser.id);
 if(db.prepare('SELECT COUNT(*) c FROM products').get().c===0){const ins=db.prepare('INSERT INTO products(game,name,price,desc,account_data) VALUES (?,?,?,?,?)');ins.run('Free Fire','Acc Rank cao + nhiều skin',250000,'Acc mẫu — thay thông tin bằng acc thật.','');ins.run('Liên Quân','Acc nhiều tướng',350000,'Acc mẫu — thay thông tin bằng acc thật.','');ins.run('PUBG Mobile','Acc nhiều skin',450000,'Acc mẫu — thay thông tin bằng acc thật.','');}
 const makeId=()=>crypto.randomUUID();
+function randomizePaymentContent(template){
+  const source=Array.from(String(template||'').trim());
+  if(source.length<2)return source.join('');
+  for(let i=source.length-1;i>0;i--){
+    const j=crypto.randomInt(i+1);
+    [source[i],source[j]]=[source[j],source[i]];
+  }
+  return source.join('');
+}
+function makeUniquePaymentContent(template){
+  const base=String(template||'').trim();
+  if(!base)return `NGS${crypto.randomInt(100000,1000000)}`;
+  for(let i=0;i<30;i++){
+    const candidate=randomizePaymentContent(base);
+    if(!db.prepare("SELECT 1 FROM orders WHERE type='bank' AND status='pending' AND payment_content=? LIMIT 1").get(candidate))return candidate;
+  }
+  // If the configured text has very few possible permutations, keep the content valid.
+  return `${randomizePaymentContent(base)}${crypto.randomInt(10,100)}`;
+}
 const userSessions=new Map();const adminSessions=new Set();
 const userAuth=(req,res,next)=>{const t=(req.headers.authorization||'').replace('Bearer ','');const uid=userSessions.get(t);if(!uid)return res.status(401).json({error:'Vui lòng đăng nhập'});req.user=db.prepare('SELECT * FROM users WHERE id=?').get(uid);if(!req.user)return res.status(401).json({error:'Tài khoản không tồn tại'});next()};
 const adminAuth=(req,res,next)=>{
@@ -134,7 +153,7 @@ async function submitCardToThesieure(order){
   if(!telco)throw new Error('Nhà mạng thẻ chưa được hỗ trợ tự động');
   const requestId=String(order.id);
   const command='charging';
-  const sign=md5(THESIEURE_PARTNER_KEY+String(order.card_code)+command+THESIEURE_PARTNER_ID+requestId+String(order.card_serial)+telco);
+  const sign=md5(THESIEURE_PARTNER_KEY+String(order.card_code)+String(order.card_serial));
   const qs=new URLSearchParams({telco,code:String(order.card_code),serial:String(order.card_serial),amount:String(order.card_value),partner_id:THESIEURE_PARTNER_ID,request_id:requestId,command,sign});
   const url=THESIEURE_API_METHOD==='POST'?THESIEURE_API_URL:THESIEURE_API_URL+(THESIEURE_API_URL.includes('?')?'&':'?')+qs.toString();
   const ac=new AbortController();const timer=setTimeout(()=>ac.abort(),15000);
@@ -333,7 +352,8 @@ app.post('/api/orders/bank',userAuth,(req,res)=>{
   const amount=Math.round(Number(req.body?.amount));
   if(!Number.isSafeInteger(amount)||amount<1000)return res.status(400).json({error:'Số tiền không hợp lệ'});
   const id=makeId();
-  const content=`NGS ${id.slice(0,8).toUpperCase()}`;
+  const bank=getSetting('bank')||{};
+  const content=makeUniquePaymentContent(bank.content||'NGS');
   db.prepare('INSERT INTO orders(id,type,user_id,amount,payment_content,status) VALUES (?,?,?,?,?,?)').run(id,'bank',req.user.id,amount,content,'pending');
   res.json({id,status:'pending',amount,content,message:'Chuyển đúng số tiền và nội dung. Khi nhà cung cấp ngân hàng gọi webhook, hệ thống sẽ tự đối soát và cộng tiền.'});
 });
@@ -371,8 +391,8 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){
