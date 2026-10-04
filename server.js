@@ -11,6 +11,11 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'nguyen188208';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'CHANGE_ME_NOW';
+const THESIEURE_PARTNER_ID = String(process.env.THESIEURE_PARTNER_ID || '21172537301').trim();
+const THESIEURE_PARTNER_KEY = String(process.env.THESIEURE_PARTNER_KEY || '').trim();
+const THESIEURE_API_URL = String(process.env.THESIEURE_API_URL || 'https://thesieure.com/chargingws/v2').trim();
+const THESIEURE_API_METHOD = String(process.env.THESIEURE_API_METHOD || 'GET').trim().toUpperCase();
+const BANK_WEBHOOK_SECRET = String(process.env.BANK_WEBHOOK_SECRET || '').trim();
 const db = new Database(process.env.DB_PATH || path.join(__dirname, 'store.db'));
 db.pragma('journal_mode = WAL');
 
@@ -39,6 +44,13 @@ addCol('orders','withdraw_owner','TEXT');
 addCol('orders','coupon_code','TEXT');
 addCol('orders','discount','INTEGER DEFAULT 0');
 addCol('orders','withdraw_fee','INTEGER DEFAULT 0');
+addCol('orders','provider_tx_id','TEXT');
+addCol('orders','provider_status','TEXT');
+addCol('orders','provider_message','TEXT');
+addCol('orders','callback_sign','TEXT');
+addCol('orders','processed_at','TEXT');
+addCol('orders','payment_content','TEXT');
+db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_provider_tx_id ON orders(provider_tx_id) WHERE provider_tx_id IS NOT NULL AND provider_tx_id <> '';`);
 
 const defaults={rate:20,bank:{name:'MB Bank',number:'0123456789',owner:'NGUYEN GAME STORE',content:'NGS + mã đơn'},cardRates:{Viettel:20,Vinaphone:20,Mobifone:20,Garena:15,Zing:15},cardRateMode:'discount',topups:{'Free Fire (Kim cương xong ngay)':5,'Nạp Sò':5,'Delta Force':5,'Liên Quân Mobile (Thẻ Garena)':5,'Quân Huy Liên Quân (xong ngay, chỉ nạp TK FB, Google)':5,'Nạp Roblox (nhận RB ngay)':5,'Robux 120h':5,'Thẻ tuần & tháng (Free Fire)':5,'FIFA Online':5,'PUBG Mobile VN':5,'Liên Minh Huyền Thoại: Tốc Chiến':5,'Liên Minh Huyền Thoại PC':5,'Valorant':5,'Đấu Trường Chân Lý':5,'Cái Thế Tranh Hùng':5},withdrawFee:5000,support:[]};
 for(const [k,v] of Object.entries(defaults)) db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)').run(k,JSON.stringify(v));
@@ -66,8 +78,78 @@ const adminAuth=(req,res,next)=>{
   req.user=u;
   next();
 };
-app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'100kb'}));app.use(rateLimit({windowMs:60000,max:120,standardHeaders:true,legacyHeaders:false}));app.use(express.static(path.join(__dirname,'public')));
-app.get('/api/health',(req,res)=>res.json({ok:true,service:'nguyengamestore'}));
+app.use(helmet({contentSecurityPolicy:false}));app.use(express.json({limit:'100kb'}));app.use(express.urlencoded({extended:false,limit:'100kb'}));app.use(rateLimit({windowMs:60000,max:120,standardHeaders:true,legacyHeaders:false}));app.use(express.static(path.join(__dirname,'public')));
+
+const telcoMap={Viettel:'VIETTEL',Vinaphone:'VINAPHONE',Mobifone:'MOBIFONE',Garena:'GARENA',Zing:'ZING'};
+const md5=v=>crypto.createHash('md5').update(String(v)).digest('hex');
+const safeEqual=(a,b)=>{const aa=Buffer.from(String(a||'').toLowerCase());const bb=Buffer.from(String(b||'').toLowerCase());return aa.length===bb.length&&aa.length>0&&crypto.timingSafeEqual(aa,bb)};
+function normalizeProviderStatus(v){const n=Number(v);return Number.isFinite(n)?n:String(v||'').toLowerCase()}
+function verifyThesieureCallback(payload){
+  if(!THESIEURE_PARTNER_KEY)return false;
+  const expected=md5(THESIEURE_PARTNER_KEY+String(payload.code||'')+String(payload.serial||''));
+  return safeEqual(expected,payload.callback_sign||payload.sign||'');
+}
+function processCardProviderResult(payload){
+  const requestId=String(payload.request_id||'').trim();
+  if(!requestId)throw new Error('Thiếu request_id');
+  const result=db.transaction(()=>{
+    const o=db.prepare("SELECT * FROM orders WHERE id=? AND type='card'").get(requestId);
+    if(!o)throw new Error('Không tìm thấy đơn thẻ');
+    if(o.status==='done' || o.processed_at) return {already:true,credit:0,order:o};
+    const providerTx=String(payload.trans_id||payload.transaction_id||'').trim();
+    if(providerTx){
+      const duplicate=db.prepare("SELECT id FROM orders WHERE provider_tx_id=? AND id<>?").get(providerTx,o.id);
+      if(duplicate) return {already:true,credit:0,order:o};
+    }
+    const status=normalizeProviderStatus(payload.status);
+    const code=String(payload.code||'').trim();
+    const serial=String(payload.serial||'').trim();
+    if(code && String(o.card_code||'').trim()!==code)throw new Error('Mã thẻ callback không khớp đơn');
+    if(serial && String(o.card_serial||'').trim()!==serial)throw new Error('Serial callback không khớp đơn');
+    if([1,'success','thanhcong','thành công'].includes(status)){
+      const value=Math.round(Number(payload.value ?? payload.declared_value ?? o.card_value));
+      if(!Number.isSafeInteger(value)||value<=0)throw new Error('Mệnh giá callback không hợp lệ');
+      const rates=getSetting('cardRates')||{};
+      const localType=Object.keys(telcoMap).find(k=>telcoMap[k]===String(payload.telco||'').toUpperCase())||o.card_type;
+      const discount=Math.max(0,Math.min(100,Number(rates[localType]??getSetting('rate')??0)));
+      const credit=Math.round(value*(100-discount)/100);
+      const now=new Date().toISOString();
+      db.prepare(`UPDATE users SET balance=balance+? WHERE id=?`).run(credit,o.user_id);
+      db.prepare(`UPDATE orders SET status='done',amount=?,card_value=?,provider_tx_id=?,provider_status=?,provider_message=?,callback_sign=?,processed_at=? WHERE id=?`).run(credit,value,providerTx||null,String(payload.status??''),String(payload.message||'').slice(0,500),String(payload.callback_sign||'').slice(0,128),now,o.id);
+      return {already:false,credit,orderId:o.id,status:'done'};
+    }
+    if(status===99 || status==='pending' || status==='processing'){
+      db.prepare(`UPDATE orders SET provider_tx_id=COALESCE(?,provider_tx_id),provider_status=?,provider_message=?,callback_sign=? WHERE id=?`).run(providerTx||null,String(payload.status??''),String(payload.message||'').slice(0,500),String(payload.callback_sign||'').slice(0,128),o.id);
+      return {already:false,credit:0,orderId:o.id,status:'pending'};
+    }
+    const now=new Date().toISOString();
+    db.prepare(`UPDATE orders SET status='rejected',provider_tx_id=?,provider_status=?,provider_message=?,callback_sign=?,processed_at=? WHERE id=?`).run(providerTx||null,String(payload.status??''),String(payload.message||'').slice(0,500),String(payload.callback_sign||'').slice(0,128),now,o.id);
+    return {already:false,credit:0,orderId:o.id,status:'rejected'};
+  })();
+  return result;
+}
+async function submitCardToThesieure(order){
+  if(!THESIEURE_PARTNER_ID || !THESIEURE_PARTNER_KEY) return {configured:false};
+  const telco=telcoMap[order.card_type];
+  if(!telco)throw new Error('Nhà mạng thẻ chưa được hỗ trợ tự động');
+  const requestId=String(order.id);
+  const command='charging';
+  const sign=md5(THESIEURE_PARTNER_KEY+String(order.card_code)+command+THESIEURE_PARTNER_ID+requestId+String(order.card_serial)+telco);
+  const qs=new URLSearchParams({telco,code:String(order.card_code),serial:String(order.card_serial),amount:String(order.card_value),partner_id:THESIEURE_PARTNER_ID,request_id:requestId,command,sign});
+  const url=THESIEURE_API_METHOD==='POST'?THESIEURE_API_URL:THESIEURE_API_URL+(THESIEURE_API_URL.includes('?')?'&':'?')+qs.toString();
+  const ac=new AbortController();const timer=setTimeout(()=>ac.abort(),15000);
+  try{
+    const opts={method:THESIEURE_API_METHOD==='POST'?'POST':'GET',headers:{accept:'application/json,text/plain,*/*'},signal:ac.signal};
+    if(opts.method==='POST'){opts.headers['content-type']='application/x-www-form-urlencoded';opts.body=qs.toString()}
+    const r=await fetch(url,opts);
+    const text=await r.text();
+    let data;try{data=JSON.parse(text)}catch{data={message:text,status:r.ok?99:0}};
+    if(!r.ok)throw new Error(`Thesieure HTTP ${r.status}`);
+    return {configured:true,data};
+  }finally{clearTimeout(timer)}
+}
+
+app.get('/api/health',(req,res)=>res.json({ok:true,service:'nguyengamestore',thesieure:{configured:!!THESIEURE_PARTNER_KEY,partner_id:THESIEURE_PARTNER_ID}}));
 app.get('/api/config',(req,res)=>res.json({rate:getSetting('rate'),bank:getSetting('bank'),cardRates:getSetting('cardRates'),topups:getSetting('topups'),withdrawFee:Number(getSetting('withdrawFee')||0),support:getSetting('support')||[]}));
 app.get('/api/products',(req,res)=>res.json(db.prepare("SELECT id,game,name,price,desc,status FROM products WHERE status='available' ORDER BY id DESC").all()));
 app.get('/api/coupons/:code',userAuth,(req,res)=>{
@@ -186,8 +268,75 @@ app.post('/api/admin/coupons',adminAuth,(req,res)=>{const code=String(req.body?.
 app.delete('/api/admin/coupons/:id',adminAuth,(req,res)=>{db.prepare('DELETE FROM coupons WHERE id=?').run(req.params.id);res.json({ok:true})});
 app.post('/api/admin/orders/:id/approve-card',adminAuth,(req,res)=>{const tx=db.transaction(()=>{const o=db.prepare("SELECT * FROM orders WHERE id=? AND type='card' AND status='pending'").get(req.params.id);if(!o)throw new Error('Đơn không hợp lệ');const rates=getSetting('cardRates')||{};const discount=Math.max(0,Math.min(100,Number(rates[o.card_type]??getSetting('rate')??0)));const credit=Math.round(Number(o.card_value)*(100-discount)/100);db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(credit,o.user_id);db.prepare("UPDATE orders SET status='done',amount=? WHERE id=?").run(credit,o.id);return credit;});try{res.json({ok:true,credit:tx()})}catch(e){res.status(400).json({error:e.message})}});
 app.post('/api/admin/orders/:id/status',adminAuth,(req,res)=>{const s=req.body?.status;if(!['pending','done','rejected'].includes(s))return res.status(400).json({error:'Status không hợp lệ'});db.prepare('UPDATE orders SET status=? WHERE id=?').run(s,req.params.id);res.json({ok:true})});
-app.post('/api/orders/card',userAuth,(req,res)=>{const {type,value,code,serial}=req.body;if(!type||!value||!code||!serial)return res.status(400).json({error:'Thiếu thông tin'});const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,card_type,card_value,card_code,card_serial,status) VALUES (?,?,?,?,?,?,?,?)').run(id,'card',req.user.id,type,+value,code,serial,'pending');res.json({id,status:'pending'});});
-app.post('/api/orders/bank',userAuth,(req,res)=>{const {amount}=req.body;if(!amount||amount<1000)return res.status(400).json({error:'Số tiền không hợp lệ'});const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,status) VALUES (?,?,?,?,?)').run(id,'bank',req.user.id,+amount,'pending');res.json({id,status:'pending'});});
+app.post('/api/orders/card',userAuth,async (req,res)=>{
+  const {type,value,code,serial}=req.body||{};
+  const cleanType=String(type||'').trim();const cleanCode=String(code||'').trim();const cleanSerial=String(serial||'').trim();const faceValue=Math.round(Number(value));
+  if(!cleanType||!faceValue||!cleanCode||!cleanSerial)return res.status(400).json({error:'Thiếu thông tin'});
+  if(!telcoMap[cleanType])return res.status(400).json({error:'Loại thẻ chưa được hỗ trợ tự động'});
+  const id=makeId();
+  db.prepare('INSERT INTO orders(id,type,user_id,card_type,card_value,card_code,card_serial,status) VALUES (?,?,?,?,?,?,?,?)').run(id,'card',req.user.id,cleanType,faceValue,cleanCode,cleanSerial,'pending');
+  try{
+    const order=db.prepare('SELECT * FROM orders WHERE id=?').get(id);
+    const out=await submitCardToThesieure(order);
+    if(!out.configured)return res.json({id,status:'pending',message:'Đơn đã tạo. API thẻ chưa được cấu hình trên Railway.'});
+    const provider=out.data||{};
+    if(provider.callback_sign && !verifyThesieureCallback(provider)) return res.status(502).json({error:'Kết quả API có chữ ký không hợp lệ'});
+    if(provider.request_id || provider.status!==undefined){
+      const result=processCardProviderResult({...provider,request_id:provider.request_id||id});
+      return res.json({id,status:result.status||'pending',credit:result.credit||0,already:!!result.already,message:provider.message||'Đã gửi thẻ lên hệ thống'});
+    }
+    res.json({id,status:'pending',message:'Đã gửi thẻ, chờ callback từ Thesieure'});
+  }catch(e){
+    console.error('THESIEURE_CHARGE_ERROR',e);
+    res.status(202).json({id,status:'pending',message:'Đã tạo đơn; hệ thống sẽ tiếp tục chờ kết quả từ Thesieure.'});
+  }
+});
+
+function handleBankWebhook(payload){
+  const transactionId=String(payload.transaction_id||payload.trans_id||payload.reference||payload.id||'').trim();
+  const amount=Math.round(Number(payload.amount||payload.credit_amount||0));
+  const content=String(payload.content||payload.description||payload.memo||'').trim();
+  const type=String(payload.type||payload.direction||'').toUpperCase();
+  if(!transactionId||!Number.isSafeInteger(amount)||amount<=0)throw new Error('Webhook ngân hàng thiếu mã giao dịch hoặc số tiền');
+  if(type && !['IN','CREDIT','CREDITED','RECEIVE','RECEIVED'].includes(type))return {ignored:true};
+  return db.transaction(()=>{
+    const duplicate=db.prepare("SELECT id FROM orders WHERE provider_tx_id=?").get(transactionId);
+    if(duplicate)return {already:true,orderId:duplicate.id,credit:0};
+    const pending=db.prepare("SELECT * FROM orders WHERE type='bank' AND status='pending' AND amount=? AND payment_content IS NOT NULL ORDER BY created_at ASC").all(amount);
+    const matches=pending.filter(o=>content.toUpperCase().includes(String(o.payment_content||'').toUpperCase()));
+    if(matches.length!==1)throw new Error(matches.length===0?'Không tìm thấy đơn chuyển khoản khớp số tiền + nội dung':'Có nhiều đơn cùng khớp; không tự cộng để tránh nhầm');
+    const o=matches[0];
+    const now=new Date().toISOString();
+    db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(amount,o.user_id);
+    db.prepare("UPDATE orders SET status='done',provider_tx_id=?,provider_status='success',provider_message=?,processed_at=? WHERE id=?").run(transactionId,'Bank webhook',now,o.id);
+    return {already:false,orderId:o.id,credit:amount};
+  })();
+}
+function validBankWebhook(req){
+  if(!BANK_WEBHOOK_SECRET)return false;
+  const supplied=String(req.get('x-webhook-secret')||req.query?.secret||req.body?.secret||'');
+  return safeEqual(BANK_WEBHOOK_SECRET,supplied);
+}
+app.all('/api/webhooks/bank',(req,res)=>{
+  if(!validBankWebhook(req))return res.status(401).json({error:'Webhook secret không hợp lệ'});
+  try{const result=handleBankWebhook(req.body&&Object.keys(req.body).length?req.body:req.query);res.json({ok:true,...result})}catch(e){console.error('BANK_WEBHOOK_ERROR',e);res.status(400).json({error:e.message})}
+});
+app.all('/api/webhooks/thesieure/recharge',(req,res)=>{
+  const payload={...(req.query||{}),...(req.body||{})};
+  try{
+    if(!verifyThesieureCallback(payload))return res.status(401).json({error:'callback_sign không hợp lệ'});
+    const result=processCardProviderResult(payload);
+    res.json({ok:true,received:true,...result});
+  }catch(e){console.error('THESIEURE_CALLBACK_ERROR',e);res.status(400).json({error:e.message})}
+});
+app.post('/api/orders/bank',userAuth,(req,res)=>{
+  const amount=Math.round(Number(req.body?.amount));
+  if(!Number.isSafeInteger(amount)||amount<1000)return res.status(400).json({error:'Số tiền không hợp lệ'});
+  const id=makeId();
+  const content=`NGS ${id.slice(0,8).toUpperCase()}`;
+  db.prepare('INSERT INTO orders(id,type,user_id,amount,payment_content,status) VALUES (?,?,?,?,?,?)').run(id,'bank',req.user.id,amount,content,'pending');
+  res.json({id,status:'pending',amount,content,message:'Chuyển đúng số tiền và nội dung. Khi nhà cung cấp ngân hàng gọi webhook, hệ thống sẽ tự đối soát và cộng tiền.'});
+});
 app.post('/api/orders/topup',userAuth,(req,res)=>{const {game,value,uid,gameLogin='',gameAccount='',serverLink=''}=req.body;if(!game||!value||!uid)return res.status(400).json({error:'Thiếu thông tin'});const rates=getSetting('topups')||{};const rate=+rates[game]||0;const basePay=Math.round(+value*(100-rate)/100);const login=String(gameLogin||'').trim();const fee=(game==='Robux 120h'&&login)?8000:0;const pay=basePay+fee;if(req.user.balance<pay)return res.status(400).json({error:'Số dư không đủ'});const finalUid=[String(uid||'').trim(),game==='Robux 120h'&&gameAccount?`Tài khoản game: ${String(gameAccount).trim()}`:'',game==='Robux 120h'&&serverLink?`Link SVV: ${String(serverLink).trim()}`:'',game==='Robux 120h'&&login?`TK/MK: ${login}`:''].filter(Boolean).join('\n');const tx=db.transaction(()=>{db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(pay,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,game,uid,status) VALUES (?,?,?,?,?,?,?)').run(id,'topup',req.user.id,pay,game,finalUid,'pending');return id})();res.json({id:tx,pay,basePay,fee,rate,status:'pending'});});
 app.post('/api/orders/withdraw',userAuth,(req,res)=>{const {bank,number,owner,amount}=req.body;const requested=Math.round(Number(amount));const fee=Math.max(0,Math.round(Number(getSetting('withdrawFee')||0)));const total=requested+fee;if(!bank||!number||!owner||!Number.isSafeInteger(requested)||requested<1000)return res.status(400).json({error:'Thông tin rút tiền không hợp lệ'});try{const result=db.transaction(()=>{const u=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);if(!u||u.balance<total)throw new Error(`Số dư không đủ. Cần ${total.toLocaleString('vi-VN')}đ gồm phí ${fee.toLocaleString('vi-VN')}đ`);db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(total,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,withdraw_bank,withdraw_number,withdraw_owner,withdraw_fee,status) VALUES (?,?,?,?,?,?,?,?,?)').run(id,'withdraw',req.user.id,requested,bank,number,owner,fee,'pending');return {id,amount:requested,fee,total,balance:u.balance-total,status:'pending'};})();res.json(result)}catch(e){res.status(400).json({error:e.message})}});
 app.post('/api/orders/buy/quote',userAuth,(req,res)=>{
@@ -222,8 +371,8 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){

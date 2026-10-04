@@ -27,3 +27,29 @@ Nếu Railway dùng database cũ, server tự bổ sung các cột còn thiếu 
 - Hiển thị số tiền thanh toán tự động theo chiết khấu.
 - Thêm phí rút cố định do admin cấu hình; ví dụ rút 100.000đ, phí 5.000đ thì tổng trừ ví 105.000đ.
 - Phí rút mới được áp dụng tự động cho các yêu cầu rút mới.
+
+
+## Tích hợp nạp thẻ tự động Thesieure
+
+API Recharge được nối ở server, không đặt Partner Key trong frontend. Railway cần các biến môi trường:
+
+- `THESIEURE_PARTNER_ID=21172537301`
+- `THESIEURE_PARTNER_KEY=...` (Partner Key thật của Merchant)
+- `THESIEURE_API_URL=https://thesieure.com/chargingws/v2`
+- `THESIEURE_API_METHOD=GET` (đổi thành `POST` nếu API Merchant của bạn yêu cầu POST)
+
+Callback URL cần khai báo trong Merchant là:
+`https://<domain-Railway-cua-ban>/api/webhooks/thesieure/recharge`
+
+Server kiểm tra `callback_sign`, đối chiếu `request_id`, mã thẻ/serial và dùng transaction SQLite để đảm bảo callback trùng không cộng tiền lần hai. `provider_tx_id` cũng được unique để chống xử lý lại cùng giao dịch.
+
+## Chuyển khoản tự động
+
+Đơn chuyển khoản tạo nội dung duy nhất dạng `NGS XXXXXXXX`. Endpoint webhook của website là:
+`/api/webhooks/bank`
+
+Railway cần `BANK_WEBHOOK_SECRET`. Đơn vị ngân hàng/trung gian cần gửi `transaction_id`, `amount`, `content` và tùy chọn `type` (`IN`/`CREDIT`). Server chỉ tự cộng khi số tiền + nội dung khớp đúng một đơn pending và mã giao dịch chưa từng xử lý.
+
+## Lưu ý
+
+Thesieure phải kích hoạt API Merchant và callback cho tài khoản của bạn. URL/API cụ thể có thể khác theo cấu hình Merchant, vì vậy `THESIEURE_API_URL` và `THESIEURE_API_METHOD` được để cấu hình thay vì hard-code bắt buộc.
