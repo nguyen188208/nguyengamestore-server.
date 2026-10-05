@@ -41,7 +41,7 @@ API Recharge được nối ở server, không đặt Partner Key trong frontend
 Callback URL cần khai báo trong Merchant là:
 `https://<domain-Railway-cua-ban>/api/webhooks/thesieure/recharge`
 
-Server kiểm tra `callback_sign`, đối chiếu `request_id`, mã thẻ/serial và dùng transaction SQLite để đảm bảo callback trùng không cộng tiền lần hai. `provider_tx_id` cũng được unique để chống xử lý lại cùng giao dịch.
+Server kiểm tra chữ ký callback khi Thesieure gửi chữ ký; nếu Merchant callback của bạn không gửi chữ ký, có thể dùng `THESIEURE_CALLBACK_TOKEN` và URL callback kèm `?token=...` (chỉ khi Merchant hỗ trợ query parameters). Server đối chiếu `request_id`, mã thẻ/serial và dùng transaction SQLite để đảm bảo callback trùng không cộng tiền lần hai. `provider_tx_id` cũng được unique để chống xử lý lại cùng giao dịch.
 
 ## Chuyển khoản tự động
 

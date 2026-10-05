@@ -16,6 +16,7 @@ const THESIEURE_PARTNER_ID = String(process.env.THESIEURE_PARTNER_ID || '2703719
 const THESIEURE_PARTNER_KEY = String(process.env.THESIEURE_PARTNER_KEY || '').trim();
 const THESIEURE_API_URL = String(process.env.THESIEURE_API_URL || 'https://thesieure.com/chargingws/v2').trim();
 const THESIEURE_API_METHOD = String(process.env.THESIEURE_API_METHOD || 'GET').trim().toUpperCase();
+const THESIEURE_CALLBACK_TOKEN = String(process.env.THESIEURE_CALLBACK_TOKEN || '').trim();
 const BANK_WEBHOOK_SECRET = String(process.env.BANK_WEBHOOK_SECRET || '').trim();
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'store.db');
 const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(DB_PATH), 'backups');
@@ -149,6 +150,15 @@ function verifyThesieureCallback(payload){
   ];
   return candidates.some(x=>safeEqual(x,supplied));
 }
+function validThesieureCallbackRequest(req,payload){
+  // Prefer a private callback token when the provider callback does not expose a signature.
+  if(THESIEURE_CALLBACK_TOKEN){
+    const supplied=String(req.query?.token||req.get('x-thesieure-callback-token')||'');
+    if(safeEqual(THESIEURE_CALLBACK_TOKEN,supplied)) return true;
+  }
+  const p=normalizeThesieurePayload(payload);
+  return !!(p.callback_sign||p.sign||p.signature) && verifyThesieureCallback(p);
+}
 function processCardProviderResult(rawPayload){
   const payload=normalizeThesieurePayload(rawPayload);
   const requestId=String(payload.request_id||'').trim();
@@ -259,6 +269,11 @@ app.get('/api/orders/history',userAuth,(req,res)=>{
 app.get('/api/orders/deposit-history',userAuth,(req,res)=>{
   const rows=db.prepare(`SELECT id,type,amount,card_type,card_value,status,created_at FROM orders WHERE user_id=? AND type IN ('card','bank') ORDER BY created_at DESC`).all(req.user.id);
   res.json(rows);
+});
+app.get('/api/orders/history/:id',userAuth,(req,res)=>{
+  const o=db.prepare(`SELECT o.id,o.type,o.amount,o.card_type,o.card_value,o.game,o.uid,o.discount,o.status,o.created_at,p.game product_game,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=? AND o.user_id=?`).get(req.params.id,req.user.id);
+  if(!o)return res.status(404).json({error:'Không tìm thấy đơn hàng'});
+  res.json(o);
 });
 app.get('/api/orders/history/:id/account',userAuth,(req,res)=>{
   const o=db.prepare(`SELECT o.id,o.type,o.status,o.product_id,o.created_at,p.game,p.name,p.account_data FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=? AND o.user_id=? AND o.type='buy'`).get(req.params.id,req.user.id);
@@ -425,7 +440,7 @@ app.all('/api/webhooks/thesieure/recharge',(req,res)=>{
   const payload=normalizeThesieurePayload({...req.query,...req.body});
   console.log('THESIEURE_CALLBACK_RECEIVED',JSON.stringify({request_id:payload.request_id,serial:payload.serial,code:payload.code,status:payload.status,value:payload.value,trans_id:payload.trans_id,has_sign:!!(payload.callback_sign||payload.sign||payload.signature)}));
   try{
-    if(!verifyThesieureCallback(payload))return res.status(401).json({error:'callback_sign không hợp lệ'});
+    if(!validThesieureCallbackRequest(req,payload))return res.status(401).json({error:'Callback Thesieure chưa được xác thực'});
     if(!payload.request_id){
       const matches=db.prepare("SELECT id FROM orders WHERE type='card' AND status='pending' AND card_code=? AND card_serial=? ORDER BY created_at DESC").all(String(payload.code||''),String(payload.serial||''));
       if(matches.length===1)payload.request_id=matches[0].id;
@@ -478,8 +493,8 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){
