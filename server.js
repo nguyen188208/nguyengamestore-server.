@@ -174,8 +174,10 @@ function processCardProviderResult(rawPayload){
     const serial=String(payload.serial||'').trim();
     if(code && String(o.card_code||'').trim()!==code)throw new Error('Mã thẻ callback không khớp đơn');
     if(serial && String(o.card_serial||'').trim()!==serial)throw new Error('Serial callback không khớp đơn');
-    if([1,'success','thanhcong','thành công'].includes(status)){
-      const value=Math.round(Number(payload.value ?? o.card_value));
+    if([1,2,'success','thanhcong','thành công'].includes(status)){
+      // Status 2 means the card is valid but its real denomination differs from the declared value.
+      // Credit using the real `value`, never the declared value.
+      const value=Math.round(Number(payload.value ?? payload.card_value ?? o.card_value));
       if(!Number.isSafeInteger(value)||value<=0)throw new Error('Mệnh giá callback không hợp lệ');
       const rates=getSetting('cardRates')||{};
       const localType=Object.keys(telcoMap).find(k=>telcoMap[k]===String(payload.telco||'').toUpperCase())||o.card_type;
@@ -436,7 +438,7 @@ app.all('/api/webhooks/bank',(req,res)=>{
   if(!validBankWebhook(req))return res.status(401).json({error:'Webhook secret không hợp lệ'});
   try{const result=handleBankWebhook(req.body&&Object.keys(req.body).length?req.body:req.query);res.json({ok:true,...result})}catch(e){console.error('BANK_WEBHOOK_ERROR',e);res.status(400).json({error:e.message})}
 });
-app.all('/api/webhooks/thesieure/recharge',(req,res)=>{
+function handleThesieureChargingCallback(req,res){
   const payload=normalizeThesieurePayload({...req.query,...req.body});
   console.log('THESIEURE_CALLBACK_RECEIVED',JSON.stringify({request_id:payload.request_id,serial:payload.serial,code:payload.code,status:payload.status,value:payload.value,trans_id:payload.trans_id,has_sign:!!(payload.callback_sign||payload.sign||payload.signature)}));
   try{
@@ -448,7 +450,12 @@ app.all('/api/webhooks/thesieure/recharge',(req,res)=>{
     const result=processCardProviderResult(payload);
     res.json({ok:true,received:true,...result});
   }catch(e){console.error('THESIEURE_CALLBACK_ERROR',e);res.status(400).json({error:e.message})}
-});
+}
+
+// Canonical callback for Thesieure Charging (Đổi thẻ). Keep the old path as a compatibility alias.
+app.all('/api/webhooks/thesieure/charging',handleThesieureChargingCallback);
+app.all('/api/webhooks/thesieure/recharge',handleThesieureChargingCallback);
+
 app.post('/api/orders/bank',userAuth,(req,res)=>{
   const amount=Math.round(Number(req.body?.amount));
   if(!Number.isSafeInteger(amount)||amount<1000)return res.status(400).json({error:'Số tiền không hợp lệ'});
@@ -493,8 +500,8 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){

@@ -33,13 +33,13 @@ Nếu Railway dùng database cũ, server tự bổ sung các cột còn thiếu 
 
 API Recharge được nối ở server, không đặt Partner Key trong frontend. Railway cần các biến môi trường:
 
-- `THESIEURE_PARTNER_ID=21172537301`
+- `THESIEURE_PARTNER_ID=27037193245`
 - `THESIEURE_PARTNER_KEY=...` (Partner Key thật của Merchant)
 - `THESIEURE_API_URL=https://thesieure.com/chargingws/v2`
 - `THESIEURE_API_METHOD=GET` (đổi thành `POST` nếu API Merchant của bạn yêu cầu POST)
 
 Callback URL cần khai báo trong Merchant là:
-`https://<domain-Railway-cua-ban>/api/webhooks/thesieure/recharge`
+`https://<domain-Railway-cua-ban>/api/webhooks/thesieure/charging`
 
 Server kiểm tra chữ ký callback khi Thesieure gửi chữ ký; nếu Merchant callback của bạn không gửi chữ ký, có thể dùng `THESIEURE_CALLBACK_TOKEN` và URL callback kèm `?token=...` (chỉ khi Merchant hỗ trợ query parameters). Server đối chiếu `request_id`, mã thẻ/serial và dùng transaction SQLite để đảm bảo callback trùng không cộng tiền lần hai. `provider_tx_id` cũng được unique để chống xử lý lại cùng giao dịch.
 
