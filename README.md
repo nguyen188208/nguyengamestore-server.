@@ -68,3 +68,7 @@ Thesieure phải kích hoạt API Merchant và callback cho tài khoản của b
 - Lịch sử đơn hàng và lịch sử nạp tiền hiển thị dạng bảng giống bố cục Thesieure: Mã đơn, Trước GD, Số tiền, Sau GD, Tiền tệ, Ngày tạo, Mô tả.
 - Lưu số dư trước/sau giao dịch cho các giao dịch mới; dữ liệu cũ chưa có mốc số dư sẽ hiển thị 0 nếu chưa được ghi nhận.
 - Cấu hình `trust proxy` cho Railway để tránh lỗi `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`.
+
+
+### Mã đơn
+Đơn mới dùng mã ngắn dạng `CC` + 8 chữ số (ví dụ `CC24487366`) để hiển thị gọn như Thesieure.

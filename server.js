@@ -93,7 +93,15 @@ const adminUser = db.prepare('SELECT id FROM users WHERE lower(username)=lower(?
 if(!adminUser) db.prepare('INSERT INTO users(username,password_hash,name,is_admin) VALUES (?,?,?,1)').run(ADMIN_USERNAME,hash(ADMIN_PASSWORD),'Administrator');
 else db.prepare('UPDATE users SET is_admin=1, password_hash=? WHERE id=?').run(hash(ADMIN_PASSWORD),adminUser.id);
 if(db.prepare('SELECT COUNT(*) c FROM products').get().c===0){const ins=db.prepare('INSERT INTO products(game,name,price,desc,account_data) VALUES (?,?,?,?,?)');ins.run('Free Fire','Acc Rank cao + nhiều skin',250000,'Acc mẫu — thay thông tin bằng acc thật.','');ins.run('Liên Quân','Acc nhiều tướng',350000,'Acc mẫu — thay thông tin bằng acc thật.','');ins.run('PUBG Mobile','Acc nhiều skin',450000,'Acc mẫu — thay thông tin bằng acc thật.','');}
-const makeId=()=>crypto.randomUUID();
+function makeId(){
+  // Mã đơn hiển thị ngắn gọn như Thesieure: CC + 8 chữ số.
+  // Vẫn kiểm tra trùng trước khi tạo đơn.
+  for(let i=0;i<20;i++){
+    const id='CC'+String(crypto.randomInt(0,100000000)).padStart(8,'0');
+    if(!db.prepare('SELECT 1 FROM orders WHERE id=?').get(id)) return id;
+  }
+  throw new Error('Không thể tạo mã đơn, vui lòng thử lại.');
+}
 const userSessions=new Map();const adminSessions=new Set();
 const userAuth=(req,res,next)=>{const t=(req.headers.authorization||'').replace('Bearer ','');const uid=userSessions.get(t);if(!uid)return res.status(401).json({error:'Vui lòng đăng nhập'});req.user=db.prepare('SELECT * FROM users WHERE id=?').get(uid);if(!req.user)return res.status(401).json({error:'Tài khoản không tồn tại'});next()};
 const adminAuth=(req,res,next)=>{
@@ -513,8 +521,8 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){
