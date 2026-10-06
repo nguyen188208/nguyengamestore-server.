@@ -9,6 +9,8 @@ import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+// Railway sits behind a trusted reverse proxy; allow express-rate-limit to read X-Forwarded-For safely.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'nguyen188208';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'CHANGE_ME_NOW';
@@ -75,6 +77,8 @@ addCol('orders','callback_sign','TEXT');
 addCol('orders','provider_response','TEXT');
 addCol('orders','processed_at','TEXT');
 addCol('orders','payment_content','TEXT');
+addCol('orders','balance_before','INTEGER');
+addCol('orders','balance_after','INTEGER');
 db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_provider_tx_id ON orders(provider_tx_id) WHERE provider_tx_id IS NOT NULL AND provider_tx_id <> '';`);
 
 const defaults={rate:20,bank:{name:'MB Bank',number:'0123456789',owner:'NGUYEN GAME STORE',content:'NGS + mã đơn'},cardRates:{Viettel:20,Vinaphone:20,Mobifone:20,Garena:15,Zing:15},cardRateMode:'discount',topups:{'Free Fire (Kim cương xong ngay)':5,'Nạp Sò':5,'Delta Force':5,'Liên Quân Mobile (Thẻ Garena)':5,'Quân Huy Liên Quân (xong ngay, chỉ nạp TK FB, Google)':5,'Nạp Roblox (nhận RB ngay)':5,'Robux 120h':5,'Thẻ tuần & tháng (Free Fire)':5,'FIFA Online':5,'PUBG Mobile VN':5,'Liên Minh Huyền Thoại: Tốc Chiến':5,'Liên Minh Huyền Thoại PC':5,'Valorant':5,'Đấu Trường Chân Lý':5,'Cái Thế Tranh Hùng':5},withdrawFee:5000,support:[]};
@@ -184,8 +188,11 @@ function processCardProviderResult(rawPayload){
       const discount=Math.max(0,Math.min(100,Number(rates[localType]??getSetting('rate')??0)));
       const credit=Math.round(value*(100-discount)/100);
       const now=new Date().toISOString();
+      const user=db.prepare('SELECT balance FROM users WHERE id=?').get(o.user_id);
+      const before=Number(user?.balance||0);
+      const after=before+credit;
       db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(credit,o.user_id);
-      db.prepare("UPDATE orders SET status='done',amount=?,card_value=?,provider_tx_id=?,provider_status=?,provider_message=?,callback_sign=?,provider_response=?,processed_at=? WHERE id=?").run(credit,value,providerTx||null,String(payload.status??''),String(payload.message||'').slice(0,500),String(payload.callback_sign||'').slice(0,128),JSON.stringify(payload).slice(0,4000),now,o.id);
+      db.prepare("UPDATE orders SET status='done',amount=?,card_value=?,balance_before=?,balance_after=?,provider_tx_id=?,provider_status=?,provider_message=?,callback_sign=?,provider_response=?,processed_at=? WHERE id=?").run(credit,value,before,after,providerTx||null,String(payload.status??''),String(payload.message||'').slice(0,500),String(payload.callback_sign||'').slice(0,128),JSON.stringify(payload).slice(0,4000),now,o.id);
       return {already:false,credit,orderId:o.id,status:'done'};
     }
     if(status===99 || status==='pending' || status==='processing'){
@@ -264,16 +271,16 @@ app.post('/api/admin/login',(req,res)=>{
   res.json({token});
 });
 app.get('/api/orders/history',userAuth,(req,res)=>{
-  const rows=db.prepare(`SELECT o.id,o.type,o.amount,o.card_type,o.card_value,o.game,o.uid,o.discount,o.status,o.created_at,o.product_id,p.game product_game,p.name product_name
+  const rows=db.prepare(`SELECT o.id,o.type,o.amount,o.card_type,o.card_value,o.game,o.uid,o.discount,o.status,o.created_at,o.balance_before,o.balance_after,o.product_id,p.game product_game,p.name product_name
     FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.user_id=? ORDER BY o.created_at DESC`).all(req.user.id);
   res.json(rows);
 });
 app.get('/api/orders/deposit-history',userAuth,(req,res)=>{
-  const rows=db.prepare(`SELECT id,type,amount,card_type,card_value,status,created_at FROM orders WHERE user_id=? AND type IN ('card','bank') ORDER BY created_at DESC`).all(req.user.id);
+  const rows=db.prepare(`SELECT id,type,amount,card_type,card_value,status,created_at,balance_before,balance_after FROM orders WHERE user_id=? AND type IN ('card','bank') ORDER BY created_at DESC`).all(req.user.id);
   res.json(rows);
 });
 app.get('/api/orders/history/:id',userAuth,(req,res)=>{
-  const o=db.prepare(`SELECT o.id,o.type,o.amount,o.card_type,o.card_value,o.game,o.uid,o.discount,o.status,o.created_at,p.game product_game,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=? AND o.user_id=?`).get(req.params.id,req.user.id);
+  const o=db.prepare(`SELECT o.id,o.type,o.amount,o.card_type,o.card_value,o.game,o.uid,o.discount,o.status,o.created_at,o.balance_before,o.balance_after,p.game product_game,p.name product_name FROM orders o LEFT JOIN products p ON p.id=o.product_id WHERE o.id=? AND o.user_id=?`).get(req.params.id,req.user.id);
   if(!o)return res.status(404).json({error:'Không tìm thấy đơn hàng'});
   res.json(o);
 });
@@ -379,7 +386,7 @@ app.post('/api/admin/settings',adminAuth,(req,res)=>{for(const k of ['rate','ban
 app.get('/api/admin/coupons',adminAuth,(req,res)=>res.json(db.prepare('SELECT * FROM coupons ORDER BY id DESC').all()));
 app.post('/api/admin/coupons',adminAuth,(req,res)=>{const code=String(req.body?.code||'').trim().toUpperCase();const percent=Number(req.body?.percent);const maxUses=Number(req.body?.max_uses||0);if(!/^[A-Z0-9_-]{3,40}$/.test(code)||!Number.isInteger(percent)||percent<1||percent>100||!Number.isInteger(maxUses)||maxUses<0)return res.status(400).json({error:'Mã hoặc phần trăm giảm giá không hợp lệ'});try{const r=db.prepare('INSERT INTO coupons(code,percent,max_uses,active) VALUES (?,?,?,1)').run(code,percent,maxUses);res.json({id:r.lastInsertRowid})}catch(e){if(e?.code==='SQLITE_CONSTRAINT_UNIQUE')return res.status(409).json({error:'Mã giảm giá đã tồn tại'});res.status(500).json({error:'Không thể tạo mã giảm giá'})}});
 app.delete('/api/admin/coupons/:id',adminAuth,(req,res)=>{db.prepare('DELETE FROM coupons WHERE id=?').run(req.params.id);res.json({ok:true})});
-app.post('/api/admin/orders/:id/approve-card',adminAuth,(req,res)=>{const tx=db.transaction(()=>{const o=db.prepare("SELECT * FROM orders WHERE id=? AND type='card' AND status='pending'").get(req.params.id);if(!o)throw new Error('Đơn không hợp lệ');const rates=getSetting('cardRates')||{};const discount=Math.max(0,Math.min(100,Number(rates[o.card_type]??getSetting('rate')??0)));const credit=Math.round(Number(o.card_value)*(100-discount)/100);db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(credit,o.user_id);db.prepare("UPDATE orders SET status='done',amount=? WHERE id=?").run(credit,o.id);return credit;});try{res.json({ok:true,credit:tx()})}catch(e){res.status(400).json({error:e.message})}});
+app.post('/api/admin/orders/:id/approve-card',adminAuth,(req,res)=>{const tx=db.transaction(()=>{const o=db.prepare("SELECT * FROM orders WHERE id=? AND type='card' AND status='pending'").get(req.params.id);if(!o)throw new Error('Đơn không hợp lệ');const rates=getSetting('cardRates')||{};const discount=Math.max(0,Math.min(100,Number(rates[o.card_type]??getSetting('rate')??0)));const credit=Math.round(Number(o.card_value)*(100-discount)/100);const u=db.prepare('SELECT balance FROM users WHERE id=?').get(o.user_id);const before=Number(u?.balance||0),after=before+credit;db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(credit,o.user_id);db.prepare("UPDATE orders SET status='done',amount=?,balance_before=?,balance_after=? WHERE id=?").run(credit,before,after,o.id);return credit;});try{res.json({ok:true,credit:tx()})}catch(e){res.status(400).json({error:e.message})}});
 app.post('/api/admin/orders/:id/status',adminAuth,(req,res)=>{const s=req.body?.status;if(!['pending','done','rejected'].includes(s))return res.status(400).json({error:'Status không hợp lệ'});db.prepare('UPDATE orders SET status=? WHERE id=?').run(s,req.params.id);res.json({ok:true})});
 app.post('/api/orders/card',userAuth,async (req,res)=>{
   const {type,value,code,serial}=req.body||{};
@@ -387,7 +394,9 @@ app.post('/api/orders/card',userAuth,async (req,res)=>{
   if(!cleanType||!faceValue||!cleanCode||!cleanSerial)return res.status(400).json({error:'Thiếu thông tin'});
   if(!telcoMap[cleanType])return res.status(400).json({error:'Loại thẻ chưa được hỗ trợ tự động'});
   const id=makeId();
-  db.prepare('INSERT INTO orders(id,type,user_id,card_type,card_value,card_code,card_serial,status) VALUES (?,?,?,?,?,?,?,?)').run(id,'card',req.user.id,cleanType,faceValue,cleanCode,cleanSerial,'pending');
+  const cardUser=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);
+  const cardBalance=Number(cardUser?.balance||0);
+  db.prepare('INSERT INTO orders(id,type,user_id,card_type,card_value,card_code,card_serial,balance_before,balance_after,status) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id,'card',req.user.id,cleanType,faceValue,cleanCode,cleanSerial,cardBalance,cardBalance,'pending');
   try{
     const order=db.prepare('SELECT * FROM orders WHERE id=?').get(id);
     const out=await submitCardToThesieure(order);
@@ -424,8 +433,10 @@ function handleBankWebhook(payload){
     if(matches.length!==1)throw new Error(matches.length===0?'Không tìm thấy đơn chuyển khoản khớp số tiền + nội dung':'Có nhiều đơn cùng khớp; không tự cộng để tránh nhầm');
     const o=matches[0];
     const now=new Date().toISOString();
+    const user=db.prepare('SELECT balance FROM users WHERE id=?').get(o.user_id);
+    const before=Number(user?.balance||0),after=before+amount;
     db.prepare('UPDATE users SET balance=balance+? WHERE id=?').run(amount,o.user_id);
-    db.prepare("UPDATE orders SET status='done',provider_tx_id=?,provider_status='success',provider_message=?,processed_at=? WHERE id=?").run(transactionId,'Bank webhook',now,o.id);
+    db.prepare("UPDATE orders SET status='done',balance_before=?,balance_after=?,provider_tx_id=?,provider_status='success',provider_message=?,processed_at=? WHERE id=?").run(before,after,transactionId,'Bank webhook',now,o.id);
     return {already:false,orderId:o.id,credit:amount};
   })();
 }
@@ -463,11 +474,12 @@ app.post('/api/orders/bank',userAuth,(req,res)=>{
   const bank=getSetting('bank')||{};
   const content=String(bank.content||'').trim();
   if(!content)return res.status(400).json({error:'Admin chưa cấu hình nội dung chuyển khoản'});
-  db.prepare('INSERT INTO orders(id,type,user_id,amount,payment_content,status) VALUES (?,?,?,?,?,?)').run(id,'bank',req.user.id,amount,content,'pending');
+  const bankBalance=Number(req.user.balance||0);
+  db.prepare('INSERT INTO orders(id,type,user_id,amount,payment_content,balance_before,balance_after,status) VALUES (?,?,?,?,?,?,?,?)').run(id,'bank',req.user.id,amount,content,bankBalance,bankBalance,'pending');
   res.json({id,status:'pending',amount,content,message:'Chuyển đúng số tiền và nội dung chuyển khoản do Admin cấu hình. Khi nhà cung cấp ngân hàng gọi webhook, hệ thống sẽ tự đối soát và cộng tiền.'});
 });
-app.post('/api/orders/topup',userAuth,(req,res)=>{const {game,value,uid,gameLogin='',gameAccount='',serverLink=''}=req.body;if(!game||!value||!uid)return res.status(400).json({error:'Thiếu thông tin'});const rates=getSetting('topups')||{};const rate=+rates[game]||0;const basePay=Math.round(+value*(100-rate)/100);const login=String(gameLogin||'').trim();const fee=(game==='Robux 120h'&&login)?8000:0;const pay=basePay+fee;if(req.user.balance<pay)return res.status(400).json({error:'Số dư không đủ'});const finalUid=[String(uid||'').trim(),game==='Robux 120h'&&gameAccount?`Tài khoản game: ${String(gameAccount).trim()}`:'',game==='Robux 120h'&&serverLink?`Link SVV: ${String(serverLink).trim()}`:'',game==='Robux 120h'&&login?`TK/MK: ${login}`:''].filter(Boolean).join('\n');const tx=db.transaction(()=>{db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(pay,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,game,uid,status) VALUES (?,?,?,?,?,?,?)').run(id,'topup',req.user.id,pay,game,finalUid,'pending');return id})();res.json({id:tx,pay,basePay,fee,rate,status:'pending'});});
-app.post('/api/orders/withdraw',userAuth,(req,res)=>{const {bank,number,owner,amount}=req.body;const requested=Math.round(Number(amount));const fee=Math.max(0,Math.round(Number(getSetting('withdrawFee')||0)));const total=requested+fee;if(!bank||!number||!owner||!Number.isSafeInteger(requested)||requested<1000)return res.status(400).json({error:'Thông tin rút tiền không hợp lệ'});try{const result=db.transaction(()=>{const u=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);if(!u||u.balance<total)throw new Error(`Số dư không đủ. Cần ${total.toLocaleString('vi-VN')}đ gồm phí ${fee.toLocaleString('vi-VN')}đ`);db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(total,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,withdraw_bank,withdraw_number,withdraw_owner,withdraw_fee,status) VALUES (?,?,?,?,?,?,?,?,?)').run(id,'withdraw',req.user.id,requested,bank,number,owner,fee,'pending');return {id,amount:requested,fee,total,balance:u.balance-total,status:'pending'};})();res.json(result)}catch(e){res.status(400).json({error:e.message})}});
+app.post('/api/orders/topup',userAuth,(req,res)=>{const {game,value,uid,gameLogin='',gameAccount='',serverLink=''}=req.body;if(!game||!value||!uid)return res.status(400).json({error:'Thiếu thông tin'});const rates=getSetting('topups')||{};const rate=+rates[game]||0;const basePay=Math.round(+value*(100-rate)/100);const login=String(gameLogin||'').trim();const fee=(game==='Robux 120h'&&login)?8000:0;const pay=basePay+fee;if(req.user.balance<pay)return res.status(400).json({error:'Số dư không đủ'});const finalUid=[String(uid||'').trim(),game==='Robux 120h'&&gameAccount?`Tài khoản game: ${String(gameAccount).trim()}`:'',game==='Robux 120h'&&serverLink?`Link SVV: ${String(serverLink).trim()}`:'',game==='Robux 120h'&&login?`TK/MK: ${login}`:''].filter(Boolean).join('\n');const tx=db.transaction(()=>{const before=Number(req.user.balance||0);const after=before-pay;db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(pay,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,game,uid,balance_before,balance_after,status) VALUES (?,?,?,?,?,?,?,?,?)').run(id,'topup',req.user.id,pay,game,finalUid,before,after,'pending');return id})();res.json({id:tx,pay,basePay,fee,rate,status:'pending'});});
+app.post('/api/orders/withdraw',userAuth,(req,res)=>{const {bank,number,owner,amount}=req.body;const requested=Math.round(Number(amount));const fee=Math.max(0,Math.round(Number(getSetting('withdrawFee')||0)));const total=requested+fee;if(!bank||!number||!owner||!Number.isSafeInteger(requested)||requested<1000)return res.status(400).json({error:'Thông tin rút tiền không hợp lệ'});try{const result=db.transaction(()=>{const u=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);if(!u||u.balance<total)throw new Error(`Số dư không đủ. Cần ${total.toLocaleString('vi-VN')}đ gồm phí ${fee.toLocaleString('vi-VN')}đ`);const before=Number(u.balance||0),after=before-total;db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(total,req.user.id);const id=makeId();db.prepare('INSERT INTO orders(id,type,user_id,amount,withdraw_bank,withdraw_number,withdraw_owner,withdraw_fee,balance_before,balance_after,status) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(id,'withdraw',req.user.id,requested,bank,number,owner,fee,before,after,'pending');return {id,amount:requested,fee,total,balance:after,status:'pending'};})();res.json(result)}catch(e){res.status(400).json({error:e.message})}});
 app.post('/api/orders/buy/quote',userAuth,(req,res)=>{
   const productId=Number(req.body?.productId);
   const p=db.prepare("SELECT id,game,name,price,desc FROM products WHERE id=? AND status='available'").get(productId);
@@ -491,17 +503,18 @@ app.post('/api/orders/buy/confirm',userAuth,(req,res)=>{
       const u=db.prepare('SELECT balance FROM users WHERE id=?').get(req.user.id);
       if(!u||u.balance<total)throw new Error('Số dư không đủ');
       const id=makeId();
+      const before=Number(u.balance||0),after=before-total;
       db.prepare('UPDATE users SET balance=balance-? WHERE id=?').run(total,req.user.id);
       db.prepare("UPDATE products SET status='sold' WHERE id=?").run(p.id);
       if(coupon)db.prepare('UPDATE coupons SET used_count=used_count+1 WHERE id=?').run(coupon.id);
-      db.prepare('INSERT INTO orders(id,type,user_id,product_id,amount,coupon_code,discount,receive,status) VALUES (?,?,?,?,?,?,?,?,?)').run(id,'buy',req.user.id,p.id,total,coupon?.code||null,discount,p.account_data||'','done');
+      db.prepare('INSERT INTO orders(id,type,user_id,product_id,amount,coupon_code,discount,receive,balance_before,balance_after,status) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(id,'buy',req.user.id,p.id,total,coupon?.code||null,discount,p.account_data||'',before,after,'done');
       return {id,game:p.game,name:p.name,price:p.price,discount,total,balance:u.balance-total};
     })();
     res.json(result);
   }catch(e){res.status(409).json({error:e.message})}
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+app.use(function(req,res){
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.listen(PORT, function(){

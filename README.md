@@ -60,3 +60,11 @@ Thesieure phải kích hoạt API Merchant và callback cho tài khoản của b
 - Server tự tạo backup lúc khởi động và mỗi 6 giờ, giữ tối đa 20 bản gần nhất.
 - Admin có thể gọi chức năng backup/restore trong API quản trị; luôn nên backup trước khi cập nhật phiên bản.
 - Không xóa Volume khi redeploy. Chỉ thay source code/ZIP.
+
+
+## v34 UI/history changes
+- Đưa form nạp/đổi thẻ lên trên, phần chiết khấu xuống dưới.
+- Thêm cảnh báo: nếu sau 5 phút tiền chưa vào số dư, liên hệ Admin.
+- Lịch sử đơn hàng và lịch sử nạp tiền hiển thị dạng bảng giống bố cục Thesieure: Mã đơn, Trước GD, Số tiền, Sau GD, Tiền tệ, Ngày tạo, Mô tả.
+- Lưu số dư trước/sau giao dịch cho các giao dịch mới; dữ liệu cũ chưa có mốc số dư sẽ hiển thị 0 nếu chưa được ghi nhận.
+- Cấu hình `trust proxy` cho Railway để tránh lỗi `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`.
